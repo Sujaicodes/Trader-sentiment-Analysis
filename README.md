@@ -1,6 +1,4 @@
-<p align="center">
-# Trader Sentiment Analysis
-</p>
+                                                                 # Trader Sentiment Analysis
 
 <p align="center">
   <b>Hyperliquid trader performance mapped against Bitcoin Fear & Greed market regimes</b>
