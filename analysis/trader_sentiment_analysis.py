@@ -23,6 +23,7 @@ SENTIMENT_PATH = input_path("fear_greed_index.csv")
 OUT_DIR = ROOT / "outputs" / "trader_sentiment_analysis"
 
 SENTIMENT_ORDER = ["Extreme Fear", "Fear", "Neutral", "Greed", "Extreme Greed"]
+CHART_DIR = OUT_DIR / "charts"
 
 
 def weighted_avg(values: pd.Series, weights: pd.Series) -> float:
@@ -93,6 +94,7 @@ def clean_inputs() -> tuple[pd.DataFrame, pd.DataFrame]:
 
 def build_outputs() -> dict[str, object]:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+    CHART_DIR.mkdir(parents=True, exist_ok=True)
     trades, sentiment = clean_inputs()
 
     merged = trades.merge(
@@ -173,6 +175,8 @@ def build_outputs() -> dict[str, object]:
         .sort_values("net_pnl", ascending=False)
     )
 
+    statistical_validation = build_statistical_validation(daily)
+
     files = {
         "joined_sample": OUT_DIR / "joined_trades_sample.csv",
         "by_sentiment": OUT_DIR / "summary_by_sentiment.csv",
@@ -182,6 +186,7 @@ def build_outputs() -> dict[str, object]:
         "account_edges": OUT_DIR / "account_sentiment_edges.csv",
         "correlations": OUT_DIR / "daily_correlations.csv",
         "top_coins": OUT_DIR / "top_coins.csv",
+        "statistical_validation": OUT_DIR / "statistical_validation.csv",
     }
 
     merged.head(5000).to_csv(files["joined_sample"], index=False)
@@ -192,6 +197,9 @@ def build_outputs() -> dict[str, object]:
     account_edges.to_csv(files["account_edges"], index=False)
     correlations.to_csv(files["correlations"], index=False)
     top_coins.to_csv(files["top_coins"], index=False)
+    statistical_validation.to_csv(files["statistical_validation"], index=False)
+
+    write_chart_svgs(by_sentiment, top_coins)
 
     coverage = {
         "trade_rows": int(len(trades)),
@@ -204,7 +212,15 @@ def build_outputs() -> dict[str, object]:
         "date_max": str(trades["trade_date"].max()),
     }
 
-    write_report(coverage, by_sentiment, by_direction, account_edges, correlations, top_coins)
+    write_report(
+        coverage,
+        by_sentiment,
+        by_direction,
+        account_edges,
+        correlations,
+        top_coins,
+        statistical_validation,
+    )
 
     return {"coverage": coverage, "files": files, "out_dir": OUT_DIR}
 
@@ -234,6 +250,161 @@ def markdown_table(frame: pd.DataFrame, floatfmt: str = ".3f") -> str:
     return "\n".join(lines)
 
 
+def bootstrap_mean_ci(values: pd.Series, seed: int, draws: int = 2000) -> tuple[float, float]:
+    clean = values.dropna().to_numpy(dtype=float)
+    if len(clean) == 0:
+        return np.nan, np.nan
+    if len(clean) == 1:
+        return float(clean[0]), float(clean[0])
+    rng = np.random.default_rng(seed)
+    sample_idx = rng.integers(0, len(clean), size=(draws, len(clean)))
+    boot_means = clean[sample_idx].mean(axis=1)
+    return tuple(np.percentile(boot_means, [2.5, 97.5]).astype(float))
+
+
+def build_statistical_validation(daily: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for idx, sentiment in enumerate(SENTIMENT_ORDER):
+        subset = daily[daily["sentiment"].eq(sentiment)]
+        if subset.empty:
+            continue
+        eff_low, eff_high = bootstrap_mean_ci(subset["pnl_per_1k_volume"], seed=1100 + idx)
+        pnl_low, pnl_high = bootstrap_mean_ci(subset["net_pnl"], seed=2100 + idx)
+        mean_eff = subset["pnl_per_1k_volume"].mean()
+        mean_pnl = subset["net_pnl"].mean()
+        rows.append(
+            {
+                "sentiment": sentiment,
+                "days_observed": len(subset),
+                "mean_daily_net_pnl": mean_pnl,
+                "mean_daily_net_pnl_ci_low": pnl_low,
+                "mean_daily_net_pnl_ci_high": pnl_high,
+                "mean_daily_pnl_per_1k_volume": mean_eff,
+                "mean_daily_pnl_per_1k_ci_low": eff_low,
+                "mean_daily_pnl_per_1k_ci_high": eff_high,
+                "mean_daily_win_rate": subset["win_rate_realized"].mean(),
+                "interpretation": interpret_ci(eff_low, eff_high),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def interpret_ci(low: float, high: float) -> str:
+    if pd.isna(low) or pd.isna(high):
+        return "insufficient data"
+    if low > 0:
+        return "daily efficiency stayed positive in bootstrap interval"
+    if high < 0:
+        return "daily efficiency stayed negative in bootstrap interval"
+    return "bootstrap interval crossed zero; treat edge as less stable"
+
+
+def svg_escape(text: object) -> str:
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def svg_bar_chart(
+    labels: list[str],
+    values: list[float],
+    title: str,
+    subtitle: str,
+    output_path: Path,
+    value_prefix: str = "$",
+    value_suffix: str = "",
+    max_label_chars: int = 16,
+) -> None:
+    width, height = 1100, 560
+    left, right, top, bottom = 90, 50, 96, 94
+    chart_w = width - left - right
+    chart_h = height - top - bottom
+    max_val = max(values) if values else 1
+    scale_max = max_val * 1.18 if max_val > 0 else 1
+    bar_gap = 20
+    bar_w = max(20, (chart_w - bar_gap * (len(values) - 1)) / max(len(values), 1))
+    colors = ["#315A7D", "#00A676", "#9B5DE5", "#F26D3D", "#19324A", "#5B7C99", "#2A9D8F"]
+
+    def value_label(v: float) -> str:
+        if abs(v) >= 1_000_000:
+            return f"{value_prefix}{v / 1_000_000:.2f}M{value_suffix}"
+        if abs(v) >= 1_000:
+            return f"{value_prefix}{v / 1_000:.1f}K{value_suffix}"
+        return f"{value_prefix}{v:.2f}{value_suffix}"
+
+    grid = []
+    for i in range(5):
+        y = top + chart_h - (chart_h * i / 4)
+        tick = scale_max * i / 4
+        grid.append(
+            f'<line x1="{left}" y1="{y:.1f}" x2="{width - right}" y2="{y:.1f}" stroke="#E2E8F0" stroke-width="1"/>'
+        )
+        grid.append(
+            f'<text x="{left - 14}" y="{y + 4:.1f}" text-anchor="end" font-size="12" fill="#52606D">{svg_escape(value_label(tick))}</text>'
+        )
+
+    bars = []
+    for i, (label, value) in enumerate(zip(labels, values)):
+        x = left + i * (bar_w + bar_gap)
+        bar_h = chart_h * (value / scale_max) if scale_max else 0
+        y = top + chart_h - bar_h
+        short_label = label if len(label) <= max_label_chars else label[: max_label_chars - 1] + "."
+        bars.append(
+            f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_w:.1f}" height="{bar_h:.1f}" rx="8" fill="{colors[i % len(colors)]}"/>'
+        )
+        bars.append(
+            f'<text x="{x + bar_w / 2:.1f}" y="{y - 10:.1f}" text-anchor="middle" font-size="13" font-weight="700" fill="#0B1320">{svg_escape(value_label(value))}</text>'
+        )
+        bars.append(
+            f'<text x="{x + bar_w / 2:.1f}" y="{height - 42}" text-anchor="middle" font-size="13" fill="#334155">{svg_escape(short_label)}</text>'
+        )
+
+    svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
+  <rect width="{width}" height="{height}" fill="#F8FAFC"/>
+  <rect x="24" y="22" width="{width - 48}" height="{height - 44}" rx="18" fill="#FFFFFF" stroke="#D9E2EC"/>
+  <text x="{left}" y="54" font-size="28" font-weight="800" fill="#0B1320">{svg_escape(title)}</text>
+  <text x="{left}" y="78" font-size="14" fill="#52606D">{svg_escape(subtitle)}</text>
+  {''.join(grid)}
+  <line x1="{left}" y1="{top + chart_h}" x2="{width - right}" y2="{top + chart_h}" stroke="#CBD5E1" stroke-width="1.5"/>
+  {''.join(bars)}
+</svg>'''
+    output_path.write_text(svg, encoding="utf-8")
+
+
+def write_chart_svgs(by_sentiment: pd.DataFrame, top_coins: pd.DataFrame) -> None:
+    sentiment_labels = by_sentiment["sentiment"].tolist()
+    svg_bar_chart(
+        sentiment_labels,
+        by_sentiment["pnl_per_1k_volume"].astype(float).tolist(),
+        "PnL Efficiency by Sentiment",
+        "Net PnL per $1,000 traded volume, grouped by Fear & Greed regime",
+        CHART_DIR / "efficiency_by_sentiment.svg",
+        value_prefix="$",
+    )
+    svg_bar_chart(
+        sentiment_labels,
+        by_sentiment["net_pnl"].astype(float).tolist(),
+        "Net PnL by Sentiment",
+        "Absolute net PnL by market sentiment classification",
+        CHART_DIR / "net_pnl_by_sentiment.svg",
+        value_prefix="$",
+    )
+    top = top_coins.head(8)
+    svg_bar_chart(
+        top["Coin"].astype(str).tolist(),
+        top["net_pnl"].astype(float).tolist(),
+        "Top Coins by Net PnL",
+        "Highest contributing traded coins across all sentiment regimes",
+        CHART_DIR / "top_coins_net_pnl.svg",
+        value_prefix="$",
+        max_label_chars=12,
+    )
+
+
 def write_report(
     coverage: dict[str, object],
     by_sentiment: pd.DataFrame,
@@ -241,6 +412,7 @@ def write_report(
     account_edges: pd.DataFrame,
     correlations: pd.DataFrame,
     top_coins: pd.DataFrame,
+    statistical_validation: pd.DataFrame,
 ) -> None:
     best_eff = by_sentiment.sort_values("pnl_per_1k_volume", ascending=False).iloc[0]
     worst_eff = by_sentiment.sort_values("pnl_per_1k_volume").iloc[0]
@@ -303,14 +475,30 @@ def write_report(
         "## Account-Level Pattern",
         "The `account_sentiment_edges.csv` output ranks accounts by whether they performed more efficiently in Greed/Extreme Greed than in Fear/Extreme Fear. This is useful for separating traders who thrive in momentum regimes from traders who perform better during panic/liquidation regimes.",
         "",
+        "## Statistical Validation",
+        "Daily regime metrics were bootstrapped to create 95% confidence intervals for average daily PnL efficiency. This does not prove causality, but it checks whether the observed regime edge is stable across days instead of coming from one isolated trade cluster.",
+        "",
+        markdown_table(statistical_validation[
+            [
+                "sentiment",
+                "days_observed",
+                "mean_daily_pnl_per_1k_volume",
+                "mean_daily_pnl_per_1k_ci_low",
+                "mean_daily_pnl_per_1k_ci_high",
+                "mean_daily_win_rate",
+                "interpretation",
+            ]
+        ]),
+        "",
         "## Top Coins by Net PnL",
         markdown_table(top_coins.head(12)[["Coin", "realized_trades", "volume_usd", "net_pnl", "pnl_per_1k_volume"]]),
         "",
-        "## Strategy Implications",
-        "- Use sentiment as a position-sizing and playbook selector: compare strategy performance inside each regime before deploying the same sizing everywhere.",
-        "- Prioritize regimes with positive PnL efficiency, not just high absolute PnL, because high-volume regimes can hide weak edge.",
-        "- Review accounts with large positive or negative greed-minus-fear efficiency; they are candidates for regime-specific copy-trading, throttling, or risk limits.",
-        "- For production use, add BTC return/volatility, funding rates, and liquidation data so sentiment is tested against market structure rather than in isolation.",
+        "## Strategy Recommendations",
+        "- **Regime-aware sizing:** Use larger size only where both absolute PnL and PnL efficiency are strong. Extreme Greed had the best efficiency; Fear had the highest total PnL but should still be monitored for volume-driven noise.",
+        "- **Playbook selection:** Avoid using the same long/short playbook in every sentiment regime. Direction-level results show that certain close/sell patterns performed much better in specific regimes.",
+        "- **Trader selection:** Rank accounts by `greed_minus_fear_efficiency` before copying trades. Positive values suggest a trader is more suitable for momentum/greed environments; negative values suggest better fit for defensive or fear-driven environments.",
+        "- **Risk controls:** When the bootstrap interval crosses zero, cap exposure or require confirmation from additional signals such as BTC trend, realized volatility, funding rates, and liquidation intensity.",
+        "- **Production improvement:** Add BTC returns, funding rates, open interest, volatility, and liquidation data so sentiment is tested alongside market structure rather than in isolation.",
     ]
 
     (OUT_DIR / "trader_sentiment_report.md").write_text("\n".join(report), encoding="utf-8")

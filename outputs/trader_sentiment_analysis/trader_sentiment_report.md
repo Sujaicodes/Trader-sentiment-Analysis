@@ -40,6 +40,17 @@
 ## Account-Level Pattern
 The `account_sentiment_edges.csv` output ranks accounts by whether they performed more efficiently in Greed/Extreme Greed than in Fear/Extreme Fear. This is useful for separating traders who thrive in momentum regimes from traders who perform better during panic/liquidation regimes.
 
+## Statistical Validation
+Daily regime metrics were bootstrapped to create 95% confidence intervals for average daily PnL efficiency. This does not prove causality, but it checks whether the observed regime edge is stable across days instead of coming from one isolated trade cluster.
+
+| sentiment | days_observed | mean_daily_pnl_per_1k_volume | mean_daily_pnl_per_1k_ci_low | mean_daily_pnl_per_1k_ci_high | mean_daily_win_rate | interpretation |
+| --- | --- | --- | --- | --- | --- | --- |
+| Extreme Fear | 14.000 | 7.595 | -3.129 | 19.645 | 0.654 | bootstrap interval crossed zero; treat edge as less stable |
+| Fear | 91.000 | 8.801 | 1.643 | 16.427 | 0.881 | daily efficiency stayed positive in bootstrap interval |
+| Neutral | 67.000 | 7.346 | -1.271 | 16.716 | 0.794 | bootstrap interval crossed zero; treat edge as less stable |
+| Greed | 193.000 | 9.533 | 5.377 | 14.533 | 0.813 | daily efficiency stayed positive in bootstrap interval |
+| Extreme Greed | 114.000 | 20.812 | 12.298 | 32.030 | 0.887 | daily efficiency stayed positive in bootstrap interval |
+
 ## Top Coins by Net PnL
 | Coin | realized_trades | volume_usd | net_pnl | pnl_per_1k_volume |
 | --- | --- | --- | --- | --- |
@@ -56,8 +67,9 @@ The `account_sentiment_edges.csv` output ranks accounts by whether they performe
 | PURR/USDC | 1187.000 | 1642418.690 | 73416.502 | 44.700 |
 | AIXBT | 494.000 | 1273650.180 | 73358.613 | 57.597 |
 
-## Strategy Implications
-- Use sentiment as a position-sizing and playbook selector: compare strategy performance inside each regime before deploying the same sizing everywhere.
-- Prioritize regimes with positive PnL efficiency, not just high absolute PnL, because high-volume regimes can hide weak edge.
-- Review accounts with large positive or negative greed-minus-fear efficiency; they are candidates for regime-specific copy-trading, throttling, or risk limits.
-- For production use, add BTC return/volatility, funding rates, and liquidation data so sentiment is tested against market structure rather than in isolation.
+## Strategy Recommendations
+- **Regime-aware sizing:** Use larger size only where both absolute PnL and PnL efficiency are strong. Extreme Greed had the best efficiency; Fear had the highest total PnL but should still be monitored for volume-driven noise.
+- **Playbook selection:** Avoid using the same long/short playbook in every sentiment regime. Direction-level results show that certain close/sell patterns performed much better in specific regimes.
+- **Trader selection:** Rank accounts by `greed_minus_fear_efficiency` before copying trades. Positive values suggest a trader is more suitable for momentum/greed environments; negative values suggest better fit for defensive or fear-driven environments.
+- **Risk controls:** When the bootstrap interval crosses zero, cap exposure or require confirmation from additional signals such as BTC trend, realized volatility, funding rates, and liquidation intensity.
+- **Production improvement:** Add BTC returns, funding rates, open interest, volatility, and liquidation data so sentiment is tested alongside market structure rather than in isolation.
