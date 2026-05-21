@@ -156,7 +156,3 @@ outputs/trader_sentiment_analysis/
 
 ---
 
-<p align="center">
-  <b>Final submission link:</b>
-  <a href="https://github.com/Sujaicodes/Trader-sentiment-Analysis">github.com/Sujaicodes/Trader-sentiment-Analysis</a>
-</p>
